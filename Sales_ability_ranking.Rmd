@@ -1,0 +1,226 @@
+---
+title: "Sales Ability Ranking"
+author: "Kuan-Cheng Fu"
+date: "3/19/2021"
+output:
+  html_document:
+    df_print: paged
+---
+
+## 1. Introduction
+In this task, we will be working with a dataset which shows for each game and section of the stadium the vendor assigned to that area, the day of the week, and the number of hot dogs that were sold. On the basis of this dataset, the goal of this task is to develop a framework which is capable of ranking vendors’ sales abilities.
+
+```{r setup, include=F}
+library(latexpdf)
+library(dplyr)
+library(rstatix)
+library(car)
+library(caroline)
+library(stringr) 
+library(recosystem)
+library(RankAggreg)
+```
+
+## 2. Feature Preprocessing
+In a similar way in Question 2, we check the data type of each column and whether there are NaN values in each column. After that, we convert the data types of **game**, **day**, **section**, and **vendor** from integer to factor while the data types of **hot_dogs_sold** remains as integer.
+
+```{r 2.1}
+# Load the data
+df = read.csv("Q3_citi_vendors.csv")
+
+print("##### Check the data type of each column #####")
+str(df)
+print("############ Check for NaN values ############")
+apply(df, 2, function(x) any(is.na(x)))
+```
+
+```{r 2.2}
+# Convert the data type
+df$game = as.factor(df$game)
+df$day = as.factor(df$day)
+df$section = as.factor(df$section)
+df$vendor = as.factor(df$vendor)
+
+print("##### Check the data type of each column #####")
+str(df)
+```
+
+## 3. Methodology
+### 3.1 Multiple Linear Regression
+Again, our goal is ranking vendors’ sales abilities. Therefore, on the basis of the given dataset, we are going to regard **hot_dogs_sold** as our dependent variable and regard **game**, **day**, **section**, and **vendor** as independent variables. In order to understand the statistical relationship between our dependent variable and independent variables, we first include all independent variables in a multiple linear regression model.  
+
+Regarding the summary of our full model, the p-value of the overall F-test is way smaller than 0.05 which indicates our full model is statistically significant at a significance level of 0.05. However, we also find out that there are several coefficients equal to NaN which indicates that collinearity might exist within our full model. It is worthy to note that collinearity is a condition in which some of the independent variables are highly correlated. Therefore, after detecting collinearity, we find out that **game** and **day** are collinear variables which indicates that we have to move one of them out of the full model.  
+
+Since **day** seems to have more significant impact on **hot_dogs_sold**, we decide to move **game** out of the full model and build a reduced multiple linear regression model with the rest of independent variables, **day**, **section**, and **vendor**. Similarly, regarding the summary of our reduced model, the p-value of the overall F-test is way smaller than 0.05 which indicates our reduced model is also statistically significant at a significance level of 0.05. Moreover, we obtain the p-values for **day**, **section**, and **vendor** from a marginal ANOVA table. These three p-values are all less than a significance level of 0.05, which indicates that changes in **day**, **section**, or **vendor** are associated with changes in the dependent variable, **hot_dogs_sold**.  
+
+After finishing preparing the reduced model, we are going to estimate **hot_dogs_sold** for each **vendor** on each **day** in each **section**. Finally, we are able to preliminarily rank vendors’ sales abilities by the mean and median of their estimated **hot_dogs_sold**. Therefore, at this stage, we obtain two rankings from the reduced model.  
+
+```{r 3.1.1}
+# Build a mutiple linear regression model (full)
+fit1 = lm(hot_dogs_sold~game+day+section+vendor, data=df)
+summary(fit1)
+```
+
+```{r 3.1.2}
+# Check collinearity
+collinearity = alias(fit1)
+collinear_variables = collinearity[["Model"]][[3]][[2]][[2]]
+
+print("##### Collinear variables #####")
+collinear_variables
+```
+
+```{r 3.1.3}
+# Build a mutiple linear regression model (reduced)
+fit2 = lm(hot_dogs_sold~day+section+vendor, data=df)
+summary(fit2)
+```
+
+```{r 3.1.4}
+# Checking p-values for the independent variables
+Anova(fit2, type="III")
+```
+
+```{r 3.1.5}
+# Rank vendors’ sales abilities
+v = seq(1, 30, length.out=30)
+d = seq(1, 7, length.out = 7)
+s = seq(1, 20, length.out = 20)
+X = expand.grid(vendor=v, day=d, section=s)
+X$vendor = as.factor(X$vendor)
+X$day = as.factor(X$day)
+X$section = as.factor(X$section)
+
+predicted_hot_dogs_sold = predict(fit2, newdata=X)
+X$predicted_hot_dogs_sold = predicted_hot_dogs_sold
+
+X_groupby = X %>%
+  group_by(vendor) %>%
+  get_summary_stats(predicted_hot_dogs_sold, show=c("mean", "median"))
+
+order_mean = order(X_groupby$mean, decreasing=TRUE)
+lm_rank_mean = as.vector(X_groupby[order_mean,]$vendor)
+
+order_median = order(X_groupby$median, decreasing=TRUE)
+lm_rank_median = as.vector(X_groupby[order_median,]$vendor)
+```
+
+### 3.2 ANOVA (Analysis of Variance)
+Before trying another model to estimate **hot_dogs_sold**, we are going to apply ANOVA to further verify the statistical relationship between our dependent variable (**hot_dogs_sold**) and our dependent variables (**day**, **section**, and **vendor**). As shown in the below figures, the p-value of each one-way ANOVA test is way smaller than 0.05 which indicates that **day**, **section**, and **vendor** respectively have the significant impacts on **hot_dogs_sold**. Moreover, from the result of the three-way ANOVA test, **day**, **section**, and **vendor** still respectively have the significant impacts on **hot_dogs_sold** while interaction effect between these three dependent variables also has the significant impact on **hot_dogs_sold**. This result indicates that we should consider **day**, **section**, and **vendor** at the same time when we try to estimate **hot_dogs_sold**.  
+
+```{r 3.2.1}
+# Conduct one-way ANOVA
+for (feature in c("day", "section", "vendor")) {
+  aov = aov(reformulate(feature, "hot_dogs_sold"), data=df)
+  aov_summary = summary(aov)
+  f_value = round(aov_summary[[1]]$`F value`[1],2)
+  p_value = round(aov_summary[[1]]$`Pr(>F)`[1],3)
+  boxplot(reformulate(feature, "hot_dogs_sold"), data=df,
+          main=paste("Boxplots for each", feature, "(F =", f_value, ", p =", p_value, ")"),
+          xlab=str_to_title(feature), ylab="Hot dogs sold")
+}
+```
+
+```{r 3.2.2}
+# Conduct three-way ANOVA
+three_way_anova = aov(hot_dogs_sold~day*section*vendor, data=df)
+summary(three_way_anova)
+```
+
+### 3.3 Matrix Factorization
+After deeply understanding the statistical relationship between our dependent variable (**hot_dogs_sold**) and our dependent variables (**day**, **section**, and **vendor**), we are going to apply the concept of recommender system on our problem. The main task of recommender system is to predict unknown entries in the rating matrix based on observed values using matrix factorization. Imagining a table with row names from use_1 to user_m and with column names from item_1 to item_n, each cell with number in it is the rating given by some user on a specific item while those left blanked are unknown ratings that need to be predicted. The idea of matrix factorization method is to approximate the whole rating matrix R by the product of two matrices of lower dimensions P and Q. The process of solving the matrices P and Q is referred to as model training and the selection of penalty parameters is referred to as parameter tuning.  
+
+Now, imagining a new table with row names from vendor_1 to vendor_30 and with column names from (day_1 & section_1) to (day_7 & section_20), each cell with number in it is the number of hot dogs sold by some vendor on a specific day and section while those left blanked are unknown number that need to be predicted. Therefore, we utilize this concept to tune and train a model using the given dataset. Finally, we can also estimate **hot_dogs_sold** for each **vendor** on each **day** in each **section**. In the same way, we rank vendors’ sales abilities by the mean and median of their estimated **hot_dogs_sold**. Hence, we obtain another two rankings. 
+
+```{r 3.3.1}
+# Creat training dataset
+df_groupby = df %>%
+  group_by(vendor, day, section) %>%
+  get_summary_stats(hot_dogs_sold, type="mean")
+
+sold = df_groupby$mean
+vendor_index = as.numeric(df_groupby$vendor)
+day_section_index = c()
+for (i in 1:dim(df_groupby)[1]) {
+  day_section_index[i] = (as.numeric(df_groupby$day[i])-1)*20 + as.numeric(df_groupby$section[i])
+}
+
+train_set = data_memory(user_index=vendor_index,
+                        item_index=day_section_index,
+                        rating=sold, index1=TRUE)
+```
+
+```{r 3.3.2}
+# Train and tune the model
+set.seed(1)
+r = Reco()  
+opts_tune = r$tune(train_set, opts=list(dim      = c(10, 20, 30),
+                                        costp_l2 = c(0.01, 0.1),
+                                        costq_l2 = c(0.01, 0.1),
+                                        costp_l1 = c(0, 0.1),
+                                        costq_l1 = c(0, 0.1),
+                                        lrate    = c(0.01, 0.1),
+                                        nthread  = 4, 
+                                        niter    = 10, 
+                                        verbose  = TRUE))                
+r$train(train_set, opts=c(opts_tune$min, niter=100, nthread=4))    
+```
+
+```{r 3.3.3}
+# Rank vendors’ sales abilities
+df_preds = expand.grid(vendor=c(1:30), day_section=c(1:140))
+test_set = data_memory(df_preds$vendor, df_preds$day_section, index1=TRUE)
+df_preds$predicted_hot_dogs_sold = r$predict(test_set, out_memory())
+
+df_preds_final = df_preds %>%
+  group_by(vendor) %>%
+  get_summary_stats(predicted_hot_dogs_sold, show=c("mean", "median"))
+
+order_mean = order(df_preds_final$mean, decreasing=TRUE)
+mf_rank_mean = as.vector(df_preds_final[order_mean,]$vendor)
+
+order_median = order(df_preds_final$median, decreasing=TRUE)
+mf_rank_median = as.vector(df_preds_final[order_median,]$vendor)
+```
+
+### 3.4 Model Evaluation and Ranking
+So far, we have used **multiple linear regression** and **matrix factorization** to estimate **hot_dogs_sold** for each **vendor** on each **day** in each **section**. In this section, we are going to first evaluate these two models using RMSE. As shown in the below table, **matrix factorization** has better performance than **multiple linear regression** regarding RMSE. However, **multiple linear regression** is more interpretable than **matrix factorization**.  
+
+In addition to RMSE, it's worthy to compare the rankings from these two models. Let's focus on vendor 29, who ranks number 1 in the ranking from **multiple linear regression** but not ranks number 1 in in the ranking from **matrix factorization**. The major reason is that vendor 29 only has four records and all the records have relatively high **hot_dogs_sold**. For **multiple linear regression**, it tends to estimate **hot_dogs_sold** based on vendor 29's historical mean of **hot_dogs_sold**. However, for **matrix factorization**, it focuses on dealing with sparsity of the matrix so that it tends to estimate **hot_dogs_sold** based on every vendors' historical means of **hot_dogs_sold**.  
+
+Hence, we have to take every possible rankings into consideration to obtain one final ranking. On the basis of section 3.1 and 3.3, we now have four rankings in total. Therefore, we apply **RankAggreg** function, which performs aggregation of ordered lists based on the ranks using cross-entropy Monte Carlo method, to generate one final ranking based on those four rankings.
+
+```{r 3.4.1}
+# Evaluate two models
+lm_rmse = sqrt(mean(fit2$residuals^2))
+mf_rmse = sqrt(mean((r$predict(train_set, out_memory())-df_groupby$mean)^2))
+df_rmse = data.frame("Multiple Linear Regressoin"=c(lm_rmse), "Matrix Factorization"=c(mf_rmse), check.names=FALSE)
+row.names(df_rmse) = "RMSE"
+df_rmse
+```
+
+```{r 3.4.2}
+# Compare ranking
+df_compare_ranking = data.frame("Multiple Linear Regressoin"=lm_rank_mean, "Matrix Factorization"=mf_rank_mean, check.names=FALSE)
+df_compare_ranking
+```
+
+```{r 3.4.3}
+# Apply RankAggreg function
+ranking_matrix <- rbind(lm_rank_mean, lm_rank_median, mf_rank_mean, mf_rank_median)
+
+set.seed(1)
+ranking_result <- RankAggreg(ranking_matrix, 30, method="CE", distance="Spearman", N=500, convIn=20, rho=.1, maxIter=1500)
+ranking_list = ranking_result$top.list
+plot(ranking_result)
+```
+
+```{r 3.4.4}
+# Generate final ranking 
+ranking_list = ranking_result$top.list
+df_ranking = data.frame(ranking=ranking_list)
+df_ranking
+```
+
+## 4. Conclusion
+In this task, in order to rank vendors’ sales abilities, we basically develop a framework including preprocessing features, conducting statistical analysis, building predictive models, tuning hyperparameters, evaluating the models, and aggregating rankings from the models. Although the result might not be perfect, I believe that I still provide a reliable framework to deal with this kind of issue.
